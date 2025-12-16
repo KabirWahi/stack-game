@@ -5,6 +5,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use std::collections::VecDeque;
 use std::env;
 use std::process::Command;
 use ratatui::backend::CrosstermBackend;
@@ -25,11 +26,13 @@ const CELL_W: usize = 2; // render each block as two characters wide (letter + f
 const PLAY_W: usize = BOARD_W * CELL_W + 2; // inner width plus side walls
 const PLAY_H: usize = BOARD_H + 2; // inner height plus ceiling/floor
 const MIN_PANE_WIDTH: u16 = 36;
+const CHUNK_SIZE: usize = 8;
+const PLACEHOLDER_COMMANDS: &[&str] = &["git push", "cargo test", "ls -la", "npm run build"];
 
 #[derive(Clone, Copy)]
 enum Cell {
     Empty,
-    Filled(char),
+    Filled(char, char),
 }
 
 struct Board {
@@ -102,6 +105,23 @@ impl Piece {
                     *self.payload.last().unwrap_or(&'#')
                 });
                 (self.x + dx, self.y + dy, ch)
+            })
+            .collect()
+    }
+
+    fn cells_with_pairs(&self) -> Vec<(i32, i32, (char, char))> {
+        let offsets = shape_offsets(self.shape, self.rotation);
+        offsets
+            .iter()
+            .enumerate()
+            .map(|(i, (dx, dy))| {
+                let left = *self.payload.get(i * 2).or(self.payload.last()).unwrap_or(&'░');
+                let right = *self
+                    .payload
+                    .get(i * 2 + 1)
+                    .or(self.payload.last())
+                    .unwrap_or(&'░');
+                (self.x + dx, self.y + dy, (left, right))
             })
             .collect()
     }
@@ -187,14 +207,16 @@ struct Game {
     clear_flash_frames: u8,
     lock_flash_cells: Vec<(usize, usize)>,
     lock_flash_frames: u8,
+    piece_queue: VecDeque<Piece>,
+    placeholder_idx: usize,
 }
 
 impl Game {
-    fn new() -> Self {
+fn new() -> Self {
         let board = Board::new(BOARD_W, BOARD_H);
         let mut game = Self {
             board,
-            current: Piece::with_payload(Shape::I, vec!['I'; 4]),
+            current: Piece::with_payload(Shape::I, vec!['I'; CHUNK_SIZE]),
             game_over: false,
             score: 0,
             lines_cleared: 0,
@@ -202,8 +224,11 @@ impl Game {
             clear_flash_frames: 0,
             lock_flash_cells: Vec::new(),
             lock_flash_frames: 0,
+            piece_queue: VecDeque::new(),
+            placeholder_idx: 0,
         };
-        game.spawn_random();
+        game.refill_placeholders();
+        game.spawn_next();
         game
     }
 
@@ -216,7 +241,7 @@ impl Game {
             if xu >= self.board.width || yu >= self.board.height {
                 return false;
             }
-            if let Cell::Filled(_) = self.board.get(xu, yu) {
+            if let Cell::Filled(_, _) = self.board.get(xu, yu) {
                 return false;
             }
         }
@@ -225,18 +250,18 @@ impl Game {
 
     fn lock_piece(&mut self) {
         self.lock_flash_cells.clear();
-        for (x, y, ch) in self.current.cells() {
+        for (x, y, (left, right)) in self.current.cells_with_pairs() {
             if x >= 0 && y >= 0 {
                 let (xu, yu) = (x as usize, y as usize);
                 if xu < self.board.width && yu < self.board.height {
-                    self.board.set(xu, yu, Cell::Filled(ch));
+                    self.board.set(xu, yu, Cell::Filled(left, right));
                     self.lock_flash_cells.push((xu, yu));
                 }
             }
         }
         self.lock_flash_frames = 1;
         let full_rows: Vec<usize> = (0..self.board.height)
-            .filter(|y| (0..self.board.width).all(|x| matches!(self.board.get(x, *y), Cell::Filled(_))))
+            .filter(|y| (0..self.board.width).all(|x| matches!(self.board.get(x, *y), Cell::Filled(_, _))))
             .collect();
         if !full_rows.is_empty() {
             self.pending_clear = full_rows;
@@ -287,7 +312,7 @@ impl Game {
         }
         if !self.move_current(0, 1) {
             self.lock_piece();
-            self.spawn_random();
+            self.spawn_next();
         }
     }
 
@@ -297,7 +322,7 @@ impl Game {
         }
         while self.move_current(0, 1) {}
         self.lock_piece();
-        self.spawn_random();
+        self.spawn_next();
     }
 
     fn process_effects(&mut self) {
@@ -312,22 +337,16 @@ impl Game {
         }
     }
 
-    fn spawn_random(&mut self) {
-        let shapes = [
-            Shape::I,
-            Shape::O,
-            Shape::T,
-            Shape::S,
-            Shape::Z,
-            Shape::J,
-            Shape::L,
-        ];
-        let mut rng = thread_rng();
-        let shape = *shapes.choose(&mut rng).unwrap_or(&Shape::I);
-        let payload = vec![shape_char(shape); 4];
-        let piece = Piece::with_payload(shape, payload);
-        if self.can_place(&piece) {
-            self.current = piece;
+    fn spawn_next(&mut self) {
+        if self.piece_queue.is_empty() {
+            self.refill_placeholders();
+        }
+        if let Some(piece) = self.piece_queue.pop_front() {
+            if self.can_place(&piece) {
+                self.current = piece;
+            } else {
+                self.game_over = true;
+            }
         } else {
             self.game_over = true;
         }
@@ -384,18 +403,68 @@ impl Game {
         self.add_score(cleared);
         self.pending_clear.clear();
     }
+
+    fn refill_placeholders(&mut self) {
+        if PLACEHOLDER_COMMANDS.is_empty() {
+            return;
+        }
+        let cmd = PLACEHOLDER_COMMANDS[self.placeholder_idx % PLACEHOLDER_COMMANDS.len()];
+        self.placeholder_idx = self.placeholder_idx.wrapping_add(1);
+        let pieces = command_to_pieces(cmd);
+        for p in pieces {
+            self.piece_queue.push_back(p);
+        }
+    }
 }
 
-fn shape_char(shape: Shape) -> char {
-    match shape {
-        Shape::I => 'I',
-        Shape::O => 'O',
-        Shape::T => 'T',
-        Shape::S => 'S',
-        Shape::Z => 'Z',
-        Shape::J => 'J',
-        Shape::L => 'L',
+fn command_to_pieces(cmd: &str) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    for token in cmd.split_whitespace() {
+        for chunk in chunk_token(token) {
+            let payload = chunk_to_payload(&chunk);
+            pieces.push(Piece::with_payload(random_shape(), payload));
+        }
     }
+    pieces
+}
+
+fn chunk_token(token: &str) -> Vec<String> {
+    let mut res = Vec::new();
+    let mut chars: Vec<char> = token.chars().collect();
+    while !chars.is_empty() {
+        let mut take: Vec<char> = chars.drain(..CHUNK_SIZE.min(chars.len())).collect();
+        if take.len() < CHUNK_SIZE {
+            take.resize(CHUNK_SIZE, '░');
+        }
+        res.push(take.into_iter().collect());
+    }
+    if res.is_empty() {
+        res.push("░░░░░░░░".to_string());
+    }
+    res
+}
+
+fn chunk_to_payload(chunk: &str) -> Vec<char> {
+    let mut chars: Vec<char> = chunk.chars().collect();
+    if chars.len() < CHUNK_SIZE {
+        chars.resize(CHUNK_SIZE, '░');
+    }
+    chars.truncate(CHUNK_SIZE);
+    chars
+}
+
+fn random_shape() -> Shape {
+    let shapes = [
+        Shape::I,
+        Shape::O,
+        Shape::T,
+        Shape::S,
+        Shape::Z,
+        Shape::J,
+        Shape::L,
+    ];
+    let mut rng = thread_rng();
+    *shapes.choose(&mut rng).unwrap_or(&Shape::I)
 }
 
 struct TuiGuard {
@@ -584,23 +653,24 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
     }
 
     // Helper to plot a filled block in the inner area. Draw as `letter + light filler`.
-    let mut plot_block = |grid: &mut [Vec<char>], bx: usize, by: usize, ch: char| {
+    let mut plot_block = |grid: &mut [Vec<char>], bx: usize, by: usize, left: char, right: char| {
         let gx = 1 + bx * CELL_W;
         let gy = 1 + by;
         if gy < PLAY_H && gx + 1 < PLAY_W {
-            grid[gy][gx] = ch;
-            grid[gy][gx + 1] = '░';
+            grid[gy][gx] = left;
+            grid[gy][gx + 1] = right;
         }
     };
 
     // Locked cells (with optional lock flash override).
     for y in 0..game.board.height {
         for x in 0..game.board.width {
-            if let Cell::Filled(ch) = game.board.get(x, y) {
+            if let Cell::Filled(left_ch, right_ch) = game.board.get(x, y) {
                 let flashing = game.lock_flash_frames > 0
                     && game.lock_flash_cells.contains(&(x, y));
-                let glyph = if flashing { '▓' } else { ch };
-                plot_block(&mut grid, x, y, glyph);
+                let left = if flashing { '▓' } else { left_ch };
+                let right = if flashing { '▓' } else { right_ch };
+                plot_block(&mut grid, x, y, left, right);
             }
         }
     }
@@ -638,11 +708,11 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
     }
 
     // Active piece.
-    for (x, y, ch) in game.current.cells() {
+    for (x, y, (left, right)) in game.current.cells_with_pairs() {
         if x >= 0 && y >= 0 {
             let (xu, yu) = (x as usize, y as usize);
             if xu < game.board.width && yu < game.board.height {
-                plot_block(&mut grid, xu, yu, ch);
+                plot_block(&mut grid, xu, yu, left, right);
             }
         }
     }
