@@ -5,6 +5,8 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use std::env;
+use std::process::Command;
 use ratatui::backend::CrosstermBackend;
 use ratatui::prelude::*;
 use ratatui::text::Line;
@@ -22,6 +24,7 @@ const BOARD_H: usize = 20;
 const CELL_W: usize = 2; // render each block as two characters wide (letter + filler)
 const PLAY_W: usize = BOARD_W * CELL_W + 2; // inner width plus side walls
 const PLAY_H: usize = BOARD_H + 2; // inner height plus ceiling/floor
+const MIN_PANE_WIDTH: u16 = 36;
 
 #[derive(Clone, Copy)]
 enum Cell {
@@ -426,7 +429,9 @@ impl Drop for TuiGuard {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut tui = TuiGuard::new()?;
-    run_app(tui.terminal_mut())
+    let result = run_app(tui.terminal_mut());
+    cleanup_tmux_on_exit();
+    result
 }
 
 fn run_app(terminal: &mut Term) -> Result<(), Box<dyn Error>> {
@@ -455,6 +460,37 @@ fn run_app(terminal: &mut Term) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn cleanup_tmux_on_exit() {
+    let managed = env::var("STACK_MANAGED").unwrap_or_default() == "1";
+    let kill_session = env::var("STACK_KILL_SESSION").unwrap_or_default() == "1";
+    if !managed || env::var("TMUX").is_err() {
+        return;
+    }
+
+    if kill_session {
+        if let Ok(session) = tmux_current_session() {
+            let _ = Command::new("tmux")
+                .args(&["kill-session", "-t", &session])
+                .status();
+        }
+    } else {
+        // Fallback: kill the current pane (game pane) if possible.
+        let _ = Command::new("tmux").args(&["kill-pane"]).status();
+    }
+}
+
+fn tmux_current_session() -> Result<String, Box<dyn Error>> {
+    let out = Command::new("tmux")
+        .args(&["display-message", "-p", "#S"])
+        .output()?;
+    if out.status.success() {
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok(name)
+    } else {
+        Err("tmux display-message failed".into())
+    }
+}
+
 fn handle_input(code: KeyCode, game: &mut Game) {
     match code {
         KeyCode::Left => {
@@ -478,6 +514,14 @@ fn handle_input(code: KeyCode, game: &mut Game) {
 
 fn draw_game(frame: &mut Frame, game: &Game) {
     let area = frame.size();
+
+    if area.width < MIN_PANE_WIDTH {
+        let msg = Paragraph::new(format!("RESIZE PANE (min width: {})", MIN_PANE_WIDTH))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title("STACK"));
+        frame.render_widget(msg, area);
+        return;
+    }
 
     // Outer "cabinet" frame.
     let cabinet = Block::default()
@@ -644,7 +688,7 @@ fn draw_sidebar(frame: &mut Frame, game: &Game, area: Rect) {
     frame.render_widget(info, chunks[0]);
 
     let controls = Paragraph::new(
-        "CONTROLS\n←/→ move\n↑ rotate\n↓ soft\nspace slam\nq/esc quit",
+        "←/→ move\n↑ rotate\n↓ soft\nspace slam\nq/esc quit",
     )
     .block(Block::default().title("CONTROLS").borders(Borders::ALL))
     .wrap(Wrap { trim: true });

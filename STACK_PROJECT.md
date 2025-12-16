@@ -7,7 +7,7 @@ Long-running commands keep the game busy; failed commands corrupt the board.
 
 This project prioritizes:
 - terminal-native UX
-- ASCII / old-arcade aesthetics
+- ASCII / old-arcade aesthetics (Soviet-era vibes)
 - indirect control (you generate the game by working)
 - zero interference with the real shell
 
@@ -55,7 +55,7 @@ This project prioritizes:
 
 ---
 
-# PHASE 1 — Base Tetris (no command integration)
+# PHASE 1 — Base Tetris + Juiced UI (no command integration)
 
 ## 1.1 Game Board
 
@@ -87,7 +87,7 @@ struct Piece {
     rotation: u8,
     x: i32,
     y: i32,
-    payload: Vec<char>, // length 1–4
+    payload: Vec<char>, // length 1–4 (future: command chunks)
 }
 ```
 
@@ -101,6 +101,7 @@ struct Piece {
 | ↓        | Soft drop     |
 | ↑        | Rotate        |
 | Space    | Hard drop     |
+| q / Esc  | Quit          |
 
 ---
 
@@ -115,9 +116,7 @@ struct Piece {
 
 ---
 
-## 1.5 Line Clears + Scoring
-
-Classic scoring only (initially):
+## 1.5 Line Clears + Scoring (classic only)
 
 | Lines | Score |
 |------|-------|
@@ -130,23 +129,122 @@ Classic scoring only (initially):
 
 ## 1.6 Visual Style (ASCII / Soviet Arcade)
 
-- No colors or very limited (white / gray)
-- Borders using `+ - |` or box-drawing
-- Cells:
-  - Empty: ` `
-  - Filled: payload char (or fallback `█`)
-- Text labels:
-  - `SCORE`
-  - `LINES`
-  - `MODE: IDLE / RUN`
-- Game over message:
-  ```
-  ПРОВАЛ
-  ```
+### Playfield rendering contract
+- Logical board size: 10×20
+- Rendered as a **boxed well** with visible walls:
+  - ceiling, left wall, right wall, heavy floor
+- Render each filled cell as **2 characters wide** using:
+  - payload block: `A░` (letter + shading)
+  - empty cell: `  ` (two spaces)
+  - ghost cell: `░░` (no letters)
+  - infection: `?░`
+  - garbage: `#░` (or `X░`)
+  - flash: `██`
+
+> Note: even before command-integration, you can still render blocks as `█░` or `#░`.
+> When payload letters arrive (Phase 2/3), the same renderer will show them.
+
+### Borders
+- Prefer box drawing characters for the well and cabinet:
+  - Well: `┌ ┐ └ ┘ │ ─`
+  - Floor: `═` (heavier)
+- Keep colors minimal (monochrome or very limited).
 
 ---
 
-# PHASE 2 — Command-driven Pieces (no shell capture yet)
+## 1.7 Juiced UI Features (must be done before Phase 2)
+
+### 1.7.1 Cabinet layout (do NOT use full terminal as playfield)
+- Draw an outer “cabinet” frame around everything.
+- Inside the cabinet:
+  - left: **playfield area** (contains the 10×20 well and the falling-piece tower)
+  - right: **sidebar** (score/lines/mode + controls legend)
+- The well should be fixed-size and centered within its pane.
+
+### 1.7.2 Full well walls (ceiling + sides + heavy floor)
+- Draw the well border around the board region:
+  - ceiling line
+  - left and right walls
+  - heavy floor
+- The board cells render inside the border only.
+
+### 1.7.3 Ghost piece (“line tracker” / landing indicator)
+- Compute ghost by dropping a copy of the active piece until the next step would collide.
+- Render ghost using `░░` so it never conflicts with payload letters.
+
+### 1.7.4 Danger line
+- Draw a subtle dotted line near the top of the board (e.g., row 2 or 3).
+- Use `┈┈` or `··` across the inside width of the well.
+
+### 1.7.5 Sidebar panels
+Right pane contains boxed panels:
+- **INFO**
+  - SCORE
+  - LINES
+  - MODE: IDLE / RUN
+- **CONTROLS**
+  - ←/→ move
+  - ↑ rotate
+  - ↓ soft
+  - space slam
+  - q/esc quit
+
+### 1.7.6 Game over overlay (only inside the well)
+- Overlay message centered inside the well area.
+- Do not blank the sidebar.
+- Suggested text:
+  - `GAME OVER`
+  - `q/esc`
+
+### 1.7.7 Line clear flash (1–2 frames)
+- When rows clear:
+  - flash those rows using `██` for 120ms (or 2 frames)
+  - then remove them and shift above rows down
+
+### 1.7.8 Lock thud (1 frame)
+- When a piece locks:
+  - render those cells with a heavier look for 1 frame (e.g., `▓▓`)
+  - then revert to normal
+
+---
+
+# PHASE 2 — tmux Split Launcher + Command-driven Pieces (no shell capture yet)
+
+## 2.0 tmux split launcher (do this before tokenization work)
+
+### Goal
+Running the launcher should give:
+- left pane: real shell
+- right narrow pane: `stack-game` TUI
+
+### Implementation plan
+- Create 2 binaries:
+  - `stack-game` — the game itself
+  - `stack` — tmux launcher
+- Recommended run command:
+  ```sh
+  cargo run --bin stack
+  ```
+- Optional `Cargo.toml`:
+  - set `default-run = "stack"` so `cargo run` works.
+
+### tmux behavior
+- If not inside tmux:
+  - start a session, split window, run `stack-game` on the right, focus left, attach.
+- If inside tmux:
+  - split current window, run `stack-game` on the right, focus left.
+
+### Pane sizing
+- Right pane is a fixed width, configurable:
+  - `STACK_PANE_W` env var
+  - default: `36` columns
+
+### Too-small pane handling
+- `stack-game` checks terminal size each draw.
+- If pane is too narrow:
+  - render a centered message: `RESIZE PANE (min width: 36)`
+
+---
 
 ## 2.1 Tokenization v1 (simple)
 
@@ -155,7 +253,7 @@ Classic scoring only (initially):
   git commit -m fix
   → ["git", "commit", "-m", "fix"]
   ```
-- Keep all visible ASCII characters
+- Keep punctuation/operators (e.g., `|`, `&`, `*`, `>`, `<`, `=`) as part of tokens if present.
 - Ignore empty tokens
 
 ---
@@ -370,8 +468,9 @@ This replaces `split_whitespace()`.
 
 # MVP Completion Criteria
 
-- Tetris playable
-- Commands spawn letter-based pieces
+- Tetris playable with juiced UI (walls, ghost, danger line, cabinet, flashes)
+- tmux launcher opens split: shell left + game right
+- Commands spawn letter-based pieces (Phase 2+)
 - Long-running commands repeat cycles
 - Success bomb + failure corruption
 - Variety scoring active

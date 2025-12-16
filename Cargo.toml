@@ -7,3 +7,17 @@ edition = "2024"
 ratatui = "0.26"
 crossterm = "0.27"
 rand = "0.8"
+
+[[bin]]
+name = "stack-game"
+path = "src/main.rs"
+
+[[bin]]
+name = "stack"
+path = "src/bin/stack.rs"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
