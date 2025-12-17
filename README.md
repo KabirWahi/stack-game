@@ -1,4 +1,4 @@
-# STACK
+# WAITRIS
 
 Terminal Tetris driven by your shell commands.
 
@@ -15,7 +15,7 @@ cargo build
 3) Run the launcher:
 
 ```sh
-cargo run --bin stack
+cargo run --bin waitris
 ```
 
 This opens a tmux session with:

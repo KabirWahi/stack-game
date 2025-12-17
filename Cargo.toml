@@ -13,8 +13,8 @@ name = "stack-game"
 path = "src/main.rs"
 
 [[bin]]
-name = "stack"
-path = "src/bin/stack.rs"
+name = "waitris"
+path = "src/bin/waitris.rs"
 
 [profile.dev]
 opt-level = 0
