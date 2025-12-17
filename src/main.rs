@@ -17,6 +17,8 @@ pub const PLAY_H: usize = BOARD_H + 2; // inner height plus ceiling/floor
 pub const MIN_PANE_WIDTH: u16 = 36;
 pub const CHUNK_SIZE: usize = 8;
 pub const SOCKET_PATH: &str = "/tmp/stack-game.sock";
+pub const VARIETY_THRESH: i32 = 100;
+pub const BOMB_CAP: i32 = 3;
 
 #[derive(Debug)]
 pub enum CommandEvent {
@@ -28,6 +30,7 @@ pub struct QueuedPiece {
     pub run_id: u64,
     pub cycle: u64,
     pub piece: Piece,
+    pub is_bomb: bool,
 }
 
 pub struct CommandRun {
@@ -35,15 +38,17 @@ pub struct CommandRun {
     pub chunks: Vec<String>,
     pub cycle: u64,
     pub active: bool,
+    pub identity: String,
 }
 
 impl CommandRun {
-    fn new(id: u64, chunks: Vec<String>) -> Self {
+    fn new(id: u64, chunks: Vec<String>, identity: String) -> Self {
         Self {
             id,
             chunks,
             cycle: 0,
             active: true,
+            identity,
         }
     }
 
@@ -73,6 +78,11 @@ pub struct Game {
     pub active_piece: bool,
     pub active_run: Option<u64>,
     pub active_runs: HashMap<u64, CommandRun>,
+    pub bombs: i32,
+    pub current_is_bomb: bool,
+    pub variety_meter: i32,
+    pub last_cmd_identity: Option<String>,
+    pub variety_streak: i32,
 }
 
 impl Game {
@@ -92,6 +102,11 @@ impl Game {
             active_piece: false,
             active_run: None,
             active_runs: HashMap::new(),
+            bombs: 0,
+            current_is_bomb: false,
+            variety_meter: 0,
+            last_cmd_identity: None,
+            variety_streak: 0,
         };
         game
     }
@@ -132,6 +147,10 @@ impl Game {
         if !full_rows.is_empty() {
             self.pending_clear = full_rows;
             self.clear_flash_frames = 2;
+        }
+
+        if self.current_is_bomb {
+            self.apply_bomb_clear();
         }
     }
 
@@ -202,7 +221,8 @@ impl Game {
         self.ensure_queue();
         if let Some(qp) = self.piece_queue.pop_front() {
             self.active_piece = true;
-            self.active_run = Some(qp.run_id);
+            self.active_run = if qp.is_bomb { None } else { Some(qp.run_id) };
+            self.current_is_bomb = qp.is_bomb;
             if self.can_place(&qp.piece) {
                 self.current = qp.piece;
             } else {
@@ -211,6 +231,7 @@ impl Game {
         } else {
             self.active_piece = false;
             self.active_run = None;
+            self.current_is_bomb = false;
         }
     }
 
@@ -229,27 +250,40 @@ impl Game {
         match ev {
             CommandEvent::Start { id, command } => {
                 let chunks = crate::commands::command_to_chunks(&command);
-                let mut run = CommandRun::new(id, chunks);
+                let identity = command_identity(&command);
+                let mut run = CommandRun::new(id, chunks, identity.clone());
                 let (cycle, pieces) = run.next_cycle_pieces();
                 for p in pieces {
                     self.piece_queue.push_back(QueuedPiece {
                         run_id: id,
                         cycle,
                         piece: p,
+                        is_bomb: false,
                     });
                 }
                 self.active_runs.insert(id, run);
+                self.last_cmd_identity.get_or_insert(identity);
                 if !self.active_piece {
                     self.spawn_next();
                 }
             }
-            CommandEvent::End { id, .. } => {
+            CommandEvent::End { id, _exit_code } => {
+                let identity = self.active_runs.get(&id).map(|r| r.identity.clone());
                 if let Some(run) = self.active_runs.get_mut(&id) {
                     run.active = false;
                 }
                 // Drop queued pieces from repeat cycles for this run.
                 self.piece_queue
                     .retain(|qp| qp.run_id != id || qp.cycle <= 1);
+
+                if _exit_code != 0 {
+                    self.apply_garbage_row();
+                    self.apply_infection();
+                }
+                if let Some(id_str) = identity {
+                    self.apply_variety(&id_str, _exit_code);
+                    self.last_cmd_identity = Some(id_str);
+                }
             }
         }
     }
@@ -272,9 +306,20 @@ impl Game {
                         run_id: run.id,
                         cycle,
                         piece: p,
+                        is_bomb: false,
                     });
                 }
             }
+        }
+        if self.piece_queue.is_empty() && self.bombs > 0 {
+            let bomb = Self::make_bomb_piece();
+            self.piece_queue.push_back(QueuedPiece {
+                run_id: 0,
+                cycle: 0,
+                piece: bomb,
+                is_bomb: true,
+            });
+            self.bombs -= 1;
         }
     }
 
@@ -287,6 +332,109 @@ impl Game {
             _ => 0,
         };
         self.score += add;
+    }
+
+    fn apply_bomb_clear(&mut self) {
+        let mut to_clear = Vec::new();
+        for (x, y, _) in self.current.cells() {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let nx = x + dx;
+                    let ny = y + dy;
+                    if nx >= 0 && ny >= 0 {
+                        let (xu, yu) = (nx as usize, ny as usize);
+                        if xu < self.board.width && yu < self.board.height {
+                            to_clear.push((xu, yu));
+                        }
+                    }
+                }
+            }
+        }
+        to_clear.sort();
+        to_clear.dedup();
+        for (x, y) in to_clear {
+            self.board.set(x, y, Cell::Empty);
+        }
+    }
+
+    fn apply_garbage_row(&mut self) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let hole = rng.gen_range(0..self.board.width);
+        let mut new_cells = vec![Cell::Empty; self.board.width * self.board.height];
+        // shift everything up by one row
+        for y in 1..self.board.height {
+            for x in 0..self.board.width {
+                let src = self.board.get(x, y);
+                let dst_idx = (y - 1) * self.board.width + x;
+                new_cells[dst_idx] = src;
+            }
+        }
+        // bottom row with garbage except hole
+        for x in 0..self.board.width {
+            let idx = (self.board.height - 1) * self.board.width + x;
+            if x == hole {
+                new_cells[idx] = Cell::Empty;
+            } else {
+                new_cells[idx] = Cell::Filled('#', '░');
+            }
+        }
+        // If top row had filled cells, game over.
+        let overflow = (0..self.board.width).any(|x| matches!(self.board.get(x, 0), Cell::Filled(_, _)));
+        self.board.cells = new_cells;
+        if overflow {
+            self.game_over = true;
+        }
+    }
+
+    fn apply_infection(&mut self) {
+        use rand::seq::IteratorRandom;
+        let mut rng = rand::thread_rng();
+        let mut filled: Vec<(usize, usize)> = Vec::new();
+        for y in 0..self.board.height {
+            for x in 0..self.board.width {
+                if let Cell::Filled(_, _) = self.board.get(x, y) {
+                    filled.push((x, y));
+                }
+            }
+        }
+        let count = filled.len().min(5);
+        for &(x, y) in filled.iter().choose_multiple(&mut rng, count) {
+            self.board.set(x, y, Cell::Filled('?', '░'));
+        }
+    }
+
+    fn apply_variety(&mut self, identity: &str, exit_code: i32) {
+        let same_as_last = self.last_cmd_identity.as_deref() == Some(identity);
+        if same_as_last {
+            self.variety_meter = (self.variety_meter - 5).max(0);
+            self.variety_streak = 0;
+        } else {
+            self.variety_meter = (self.variety_meter - 2).max(0);
+            self.variety_streak += 1;
+        }
+
+        let mut variety_points = if same_as_last {
+            0
+        } else {
+            10 + 3 * (self.variety_streak.min(10))
+        };
+
+        if exit_code != 0 {
+            variety_points /= 2;
+        }
+
+        self.variety_meter += variety_points;
+
+        while self.variety_meter >= VARIETY_THRESH {
+            self.variety_meter -= VARIETY_THRESH;
+            self.bombs = (self.bombs + 1).min(BOMB_CAP);
+        }
+    }
+
+    fn make_bomb_piece() -> Piece {
+        // Use O piece for compact 2x2 bomb footprint with solid payload.
+        Piece::with_payload(Shape::O, vec!['▓'; CHUNK_SIZE])
     }
 
     fn perform_pending_clear(&mut self) {
@@ -317,4 +465,11 @@ impl Game {
 
 fn main() -> Result<(), Box<dyn Error>> {
     app::run()
+}
+
+fn command_identity(cmd: &str) -> String {
+    cmd.split_whitespace()
+        .next()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "".to_string())
 }

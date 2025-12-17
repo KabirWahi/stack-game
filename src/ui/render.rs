@@ -31,7 +31,7 @@ pub fn draw_game(frame: &mut Frame, game: &Game) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min((PLAY_W as u16 + 6).max(30)), // padding left of playfield
-            Constraint::Length(8),
+            Constraint::Length(24),
         ])
         .split(cabinet_inner);
 
@@ -101,6 +101,18 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
     }
 
     if game.active_piece {
+        if game.current_is_bomb {
+            // Bomb drop banner along the top inside the well.
+            let banner = " BOMB INBOUND ";
+            let start = ((PLAY_W as i32 - banner.len() as i32) / 2).max(1) as usize;
+            let gy = 0;
+            for (i, ch) in banner.chars().enumerate() {
+                if start + i < PLAY_W - 1 {
+                    grid[gy][start + i] = ch;
+                }
+            }
+        }
+
         // Ghost piece: draw with faint glyphs.
         let ghost = game.ghost_piece();
         for (x, y, _) in ghost.cells() {
@@ -171,7 +183,7 @@ fn draw_playfield(frame: &mut Frame, game: &Game, play_rect: Rect) {
 fn draw_sidebar(frame: &mut Frame, game: &Game, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(5), Constraint::Length(9)].as_ref())
+        .constraints([Constraint::Length(16), Constraint::Min(5), Constraint::Length(9)].as_ref())
         .split(area);
 
     let running = game.is_running();
@@ -192,10 +204,12 @@ fn draw_sidebar(frame: &mut Frame, game: &Game, area: Rect) {
     };
 
     let info = Paragraph::new(format!(
-        "SCORE\n{}\n\nLINES\n{}\n\nSTATUS\n{}",
+        "SCORE\n{}\n\nLINES\n{}\n\nSTATUS\n{}\n\nVARIETY\n{}\n\nBOMBS\n{}",
         game.score,
         game.lines_cleared,
-        status
+        status,
+        game.variety_meter,
+        game.bombs
     ))
     .block(Block::default().title("INFO").borders(Borders::ALL))
     .wrap(Wrap { trim: true });
