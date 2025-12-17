@@ -1,14 +1,19 @@
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+
+const HOOK_SOURCE: &str = include_str!("../../scripts/stack-hook.sh");
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         None => run_launcher(),
         Some("quit") => quit_session(),
+        Some("install-hook") => install_hook(),
+        Some("uninstall-hook") => uninstall_hook(),
         _ => {
-            eprintln!("usage: waitris [quit]");
+            eprintln!("usage: waitris [quit|install-hook|uninstall-hook]");
             ExitCode::from(2)
         }
     }
@@ -150,6 +155,94 @@ fn quit_session() -> ExitCode {
         Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
         Err(_) => ExitCode::from(1),
     }
+}
+
+fn install_hook() -> ExitCode {
+    let hook_path = match hook_path() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("waitris install-hook: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(e) = fs::create_dir_all(hook_path.parent().unwrap_or_else(|| Path::new("/"))) {
+        eprintln!("waitris install-hook: {e}");
+        return ExitCode::from(1);
+    }
+    if let Err(e) = fs::write(&hook_path, HOOK_SOURCE) {
+        eprintln!("waitris install-hook: {e}");
+        return ExitCode::from(1);
+    }
+
+    let source_line = format!("source {}", hook_path.display());
+    let _ = ensure_rc_line(".zshrc", &source_line);
+    let _ = ensure_rc_line(".bashrc", &source_line);
+
+    ExitCode::SUCCESS
+}
+
+fn uninstall_hook() -> ExitCode {
+    let hook_path = match hook_path() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("waitris uninstall-hook: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let source_line = format!("source {}", hook_path.display());
+    let _ = remove_rc_line(".zshrc", &source_line);
+    let _ = remove_rc_line(".bashrc", &source_line);
+    let _ = fs::remove_file(&hook_path);
+
+    ExitCode::SUCCESS
+}
+
+fn hook_path() -> Result<PathBuf, String> {
+    let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    Ok(Path::new(&home)
+        .join(".config")
+        .join("waitris")
+        .join("stack-hook.sh"))
+}
+
+fn ensure_rc_line(rc_name: &str, line: &str) -> Result<(), String> {
+    let path = rc_path(rc_name)?;
+    let mut contents = fs::read_to_string(&path).unwrap_or_default();
+    if contents.lines().any(|l| l.trim() == line) {
+        return Ok(());
+    }
+    if !contents.ends_with('\n') && !contents.is_empty() {
+        contents.push('\n');
+    }
+    contents.push_str(line);
+    contents.push('\n');
+    fs::write(&path, contents).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn remove_rc_line(rc_name: &str, line: &str) -> Result<(), String> {
+    let path = rc_path(rc_name)?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let filtered: Vec<&str> = contents
+        .lines()
+        .filter(|l| l.trim() != line)
+        .collect();
+    let mut new_contents = filtered.join("\n");
+    if !new_contents.is_empty() {
+        new_contents.push('\n');
+    }
+    fs::write(&path, new_contents).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn rc_path(rc_name: &str) -> Result<PathBuf, String> {
+    let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    Ok(Path::new(&home).join(rc_name))
 }
 
 fn current_session_name() -> Result<String, String> {

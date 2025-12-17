@@ -64,10 +64,16 @@ waitris uninstall-hook
 
 - The game listens on `/tmp/stack-game.sock`.
 
-## One‑line installer (placeholder)
+## One‑line installer (from source)
 
 ```sh
-curl -fsSL https://example.com/waitris/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/KabirWahi/waitris/main/scripts/install.sh | sh
 ```
 
-This will install `waitris` and run `waitris install-hook` for you.
+This will install `waitris` + `stack-game` via cargo and run `waitris install-hook` for you.
+
+## Uninstall
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KabirWahi/waitris/main/scripts/uninstall.sh | sh
+```
