@@ -56,7 +56,7 @@ pub fn draw_game(frame: &mut Frame, game: &Game) {
     let well_rect = stack[2];
     let mut controls_rect = stack[3];
     // Widen info/controls boxes slightly while keeping them centered in the cabinet.
-    let expand = 4u16;
+    let expand = 8u16;
     let max_right = cabinet_inner.x + cabinet_inner.width;
     let new_x = info_rect.x.saturating_sub(expand);
     let mut new_w = info_rect.width.saturating_add(expand * 2);
@@ -251,7 +251,7 @@ fn draw_controls(frame: &mut Frame, area: Rect) {
     let left = Paragraph::new(vec![
         Line::raw("←/→ move"),
         Line::raw("↓ soft"),
-        Line::raw("q/esc quit"),
+        Line::raw("q quit"),
     ])
     .alignment(Alignment::Left);
     frame.render_widget(left, cols[0]);
@@ -259,7 +259,7 @@ fn draw_controls(frame: &mut Frame, area: Rect) {
     let right = Paragraph::new(vec![
         Line::raw("↑ rotate"),
         Line::raw("space slam"),
-        Line::raw(""),
+        Line::raw("Ctrl+Space swap"),
     ])
     .alignment(Alignment::Left);
     frame.render_widget(right, cols[1]);
